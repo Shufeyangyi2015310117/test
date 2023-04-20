@@ -1,0 +1,3 @@
+useDynLib(SpatialAnno, .registration=TRUE)
+importFrom(Rcpp, evalCpp)
+exportPattern("^[[:alpha:]]+")

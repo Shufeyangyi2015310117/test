@@ -1,0 +1,9 @@
+load("/Users/yiyang/Desktop/2020-9-19/2022/Xingjie/Rpackage/SpatialAnno/inst/extdata/Rep12_MOB_manual_annotation.RData")
+ls()
+load("/Users/yiyang/Desktop/2020-9-19/2022/Xingjie/Rpackage/SpatialAnno/inst/extdata/brain.Rdata")
+ls(）
+ls()
+dlpfc
+dim(X)
+X[1:4,1:4]
+dlpfc

@@ -1,0 +1,252 @@
+---
+title: "SpatialAnno for Human_Brain"
+date: "2022-11-27"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Human Brain data
+
+We obtained the human brain slices data from the spatialLIBD project. This data consists of gene expression levels in form of read counts which are collected for a number of spatial locations. We followed to focus on the 9th slices of the human brain section 12, which contains 2000 genes and 3639 spatial locations. The gene expression of the 9th slices human brain section 12 and ground truth are both stored in the R package `SpatialAnno`.
+
+### load the brain datasets
+
+First, we load the brain datasets and extract the position of each spot from spot name.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+set.seed(99)
+library(SpatialAnno)
+load(file =   paste0(path.package("SpatialAnno"),"/extdata/brain.RData"))
+print(X[1:6,1:6])
+head(dlpfc)
+pos <- cbind(dlpfc$row, dlpfc$col) 
+head(pos)
+p <- ncol(X); n <- nrow(X)
+```
+
+In order to calculate the Adjoint matrix,we make BayesSpace metadata used in BayesSpace to get SCE.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+  #  make BayesSpace metadata used in BayesSpace
+counts <- t(X)
+rownames(counts) <- paste0("gene_", seq_len(p))
+colnames(counts) <- paste0("spot_", seq_len(n))
+  
+  ## Make array coordinates - filled rectangle
+cdata <- list()
+cdata$row <- pos[,1]
+cdata$col <- pos[,2]
+cdata <- as.data.frame(do.call(cbind, cdata))
+  
+cdata$imagerow <- cdata$row
+cdata$imagecol <- cdata$col 
+  ## Make SCE
+sce <- SingleCellExperiment(assays=list(logcounts=counts), colData=cdata)
+princ <- princomp(X)
+reducedDim(sce, "PCA") <- princ$scores[,1:50]
+  # hq <- selectFacNumber(X)$q
+y <- as.character(dlpfc$layer_guess_reordered)
+y[is.na(y)] <- 'Unknown'
+  
+K <- length(unique(y))
+```
+
+Then we read the cell-type-specific marker information and construct a cell type marker matrix.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+markers <- readRDS(paste0(path.package("SpatialAnno"),"/extdata/151507_DEGmarkerTop_5.rds"))
+markers
+```
+
+### Run SpatialAnno on dataset brain
+
+Then we find the neighborhoods using the function `find_neighbors2` implemented in our package `SpatialAnno`. After obtaining the sparse neighborhoods matrix `Adj_sp`, we can run SpatialAnno with normalized gene expression matrix `X`, sparse neighborhoods matrix `Adj_sp`, and a list of markers `marker`. Note that we choose the initial value from annotation methods `SCINA` due to the large number of non-markers.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(purrr)
+library(Matrix)
+library(SpatialAnno)
+Adj_sp <- find_neighbors2(sce, platform="Visium")
+fit <- SpatialAnno(X = X, Adj_sp = Adj_sp, marker = markers, initial = "SCINA")
+```
+
+We demonstrate the output of SpatialAnno, which is a list contains many items. We will briefly explain them one by one in the following part.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+str(fit)
+```
+
+-   'R' the estimator of probability that each spot was assigned to these seven cell types or "Unknown". The order of the cell types is the same as that of cell types in gene marker matrix.
+-   'xi' the estimator of smooth parameter.
+-   'type' the predicated cell types for each spot.
+-   'alpha_m' the estimator of base expression level.
+-   'bet_m' the estimator of extra expression level.
+-   'mu_m' the mean of cell types in marker group.
+-   'sigma_m' the covariance matrix of cell types in marker group.
+-   'Ez_u' the low-dimensional embedding.
+-   'Mu_u' the mean of cell types in non-marker group.
+-   'Sgm_u' the covariance matrix of cell types in non-marker group.
+-   'W_u' the estimator of factor loading matrix.
+-   'Lam_u' the variance of error in non-marker group.
+-   'loglik' the vector of log-likelihood of `SpatialAnno`.
+
+### plot the annotation results
+
+The predictions can be obtained in the following way. Then we can plot the annotation results of SpatialAnno on the spatial positions using R package `ggplot2`.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.height = 2.5, fig.width = 5}
+rho <- marker_list_to_mat(markers, TRUE)
+prediction = colnames(rho)[fit$type]
+print(prediction[1:20])
+library(ggplot2)
+library(scales)
+library(RColorBrewer)
+colfunc <- colorRampPalette(c("red", "white"))
+fit_type = colnames(rho)[fit$type]
+dat = data.frame(-pos[,1],pos[,2],factor(fit_type))
+names(dat)= c("imagerow", "imagecol", "Cell type")
+  
+p1 <- ggplot(dat, aes(x=imagerow, y=imagecol, color=`Cell type`)) +
+    geom_point(size = 3, alpha = 0.9) +
+    theme(axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks = element_blank())+
+    guides(colour = guide_legend(override.aes = list(size = 3))) + 
+    scale_color_manual(values=c(c("#FFD700", colfunc(100)[(7)*5], brewer.pal(9, "Greens")[5],hue_pal()(4)[4], brewer.pal(9, "Blues")[7],"#de8e4a","#574b8b"), "#808080"))
+p1
+```
+
+### calculate Kappa, mF1, and acc
+
+After obtaining the predictions, we can calculate Kappa, mF1 (mean F1), and acc to evalute the performance of annotation results by `SpatialAnno`. The function `cohen.kappa` to calculate Kappa is implemented in the package psych. The function `evaluate` to calculate mF1 is implemented in our package `SpatialAnno`. The Kappa is
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(psych)
+idx = which(y!="Unknown" & prediction!="Unknown")
+Kappa = cohen.kappa(x = cbind(y[idx],prediction[idx]))$kappa
+print(Kappa)
+```
+
+The mF1 is
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+mF1 = mean(evaluate(y[idx], prediction[idx])$F1)
+print(mF1)
+```
+
+The acc is
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+acc = mean(y[idx] == prediction[idx])
+print(acc)
+```
+
+### extract the embeddings
+
+Then we extract the embeddings from the output of `SpatialAnno`, and plot the tSNE and calculate ARI with the function `adjustedRandIndex` implemented in the R package `mclust`
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(scater)
+embedding = fit$Ez_u
+print(head(embedding))
+tsne = calculateTSNE(t(as.matrix(embedding)))
+```
+
+The tSNE plot is
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.height = 2.5, fig.width = 4}
+dat = as.data.frame(tsne)
+colnames(dat) = c("X", "Y")
+dat$cluster = prediction
+library(ggplot2)
+p1 <- ggplot(dat, aes(x=X, y=Y, color=cluster)) +
+    geom_point(size = 1, alpha = 0.9) +
+    theme_Publication()+
+    theme(legend.position = "right",
+          legend.text = element_text(size=14),
+          axis.text.x = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          panel.border = element_blank(),
+          axis.ticks = element_blank())+
+    guides(colour = guide_legend(override.aes = list(size = 3), ncol=1)) + scale_color_manual(values=c(c("#FFD700", colfunc(100)[(7)*5], brewer.pal(9, "Greens")[5],hue_pal()(4)[4], brewer.pal(9, "Blues")[7],"#de8e4a","#574b8b"), "#808080"))
+p1
+```
+
+Then we perform the clustering analysis with GMM (other clustering methods are also can be used) on embeddings and calculate ARI. The ARI is
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+fit2 = Mclust(embedding, G = 5:10)
+ARI = adjustedRandIndex(y, fit2$classification)
+print(ARI)
+```
+
+We can also plot RGB plot with the function `plot_RGB` implemented in `PRECAST`. The RGB plot is demonstrated as follows
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.height = 2, fig.width = 3}
+library(PRECAST)
+tsne3dim = calculateTSNE(t(embedding), ncomponents = 3)
+pos2 = pos
+pos2[,1] = -pos[,1]
+pList <- plot_RGB(pos2, tsne3dim, pointsize = 2)
+pList
+```
+
+### gene expression plot of markers
+
+We can also plot the expression levels of corresponding cell type-specific marker genes.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.height = 4.5, fig.width = 20}
+genes = c("ENSG00000171885","ENSG00000115756","ENSG00000164326","ENSG00000100285","ENSG00000183036","ENSG00000128422","ENSG00000168314")
+genes1 = c("AQP4","HPCAL1","CARTPT","NEFH","PCP4","KRT17","MOBP")
+  
+  
+for (i in 1:7){
+    if (i == 1){
+      idx = match(genes[i], colnames(X))
+      dat = data.frame(pos[,1], pos[,2], X[,idx])
+      names(dat)= c("imagerow", "imagecol", "cluster")
+      dat$gene = genes1[i]
+    }
+    else{
+      idx = match(genes[i], colnames(X))
+      dat2 = data.frame(pos[,1], pos[,2], X[,idx])
+      names(dat2)= c("imagerow", "imagecol", "cluster")
+      dat2$gene = genes1[i]
+      dat = rbind(dat, dat2)
+    }
+  }
+cols <- c("#0571B0",  "#CA0020")
+quant = 0.5
+dat$gene = factor(dat$gene, levels = genes1)
+dat$markers = "markers"
+p2 <- ggplot(dat, aes(x=-imagerow, y=imagecol, color=cluster))+
+    geom_point(size = 2) + 
+    facet_grid(markers~dat$gene, scales = "free")+
+    scale_colour_gradient2(
+      low = "#0571B0",
+      mid = "white",
+      high = "#CA0020", midpoint = 0.5)+
+    theme_Publication()+
+    theme(axis.title.x=element_blank(),
+          axis.text.x=element_blank(),
+          axis.ticks.x=element_blank(),
+          axis.title.y=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks.y=element_blank(),
+          strip.text.x = element_text(face = "italic"))
+p2
+```

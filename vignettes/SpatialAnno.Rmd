@@ -1,0 +1,319 @@
+---
+title: "SpatialAnno"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Install the SpatialAnno
+This vignette provides an introduction to the R package `SpatialAnno`, where the function `SpatialAnno` implements the model `SpatialAnno`, an efficient and accurate annotation method for spatial transcriptomics datasets, with the capability of effectively leveraging a large number of non-marker genes with “qualitative” information about marker genes, without using a reference dataset.
+The package can be installed with the command:
+
+`library(devtools)`
+
+`install_github("Shufeyangyi2015310117/SpatialAnno")`
+
+The package can be loaded with the command:
+```{r message=FALSE, warning=FALSE}
+library("SpatialAnno")
+```
+
+
+## SpatialAnno for simulated data
+### Generating the simulated data
+We first set the basic parameter. The spatial locations of 3639 spots were
+taken from DLPFC section 151673. Cell types are assigned with the manually annotations from the original studies. It contains 7 cell types and some "Unknown". The number of markers for each cell type is set to 4.
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+set.seed(100)
+library(mvtnorm)
+library(SingleCellExperiment)
+library(splatter)
+
+dlpfc = readRDS(file =   paste0(path.package("SpatialAnno"),"/extdata/151673.rds"))
+pos = colData(dlpfc)[,c("row", "col")]
+  
+n <- dim(dlpfc)[2] # number of spots
+p <- 200 ## number of non-markers
+y <- as.numeric(colData(dlpfc)[,c("layer_guess_reordered")])
+y[is.na(y)] = 8
+y2 <- paste0("ct", y)
+y2[y2=="ct8"] = "Unknown"
+K <- length(table(y)) -1 ## number of clusters
+num_mk_per_ct = 5 ## number of markers per cell type
+m <- num_mk_per_ct  * K ## number of markers
+```
+
+Then we define the function that can generate raw count. We simulated gene expression for each spot using the splatter package. The parameter for the proportion of DEGs (de.prob) in each layer was set as 0.5. The DE strength is determined by both mean parameter de.facloc and scale parameter de.facScale, the former ranges from 0.1 to 0.8 and the latter was set within [0.1,1], corresponding to the log fold change in expression from one-fold to two-fold across different types. All the other parameters are set based on their estimates in the seven layers from DLPFC section 151673. 
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+generate_count <- function(J = 100, de_facLoc = 0, de_facScale = 1){
+
+  dlpfc = readRDS(file =  paste0(path.package("SpatialAnno"),"/extdata/151673.rds"))
+  n <- dim(dlpfc)[2] # number of spots
+  p <- 2000 ## number of non-markers
+  y <- as.numeric(colData(dlpfc)[,c("layer_guess_reordered")])
+  y[is.na(y)] = 8
+
+  dec <- scran::modelGeneVar(dlpfc)
+  top <- scran::getTopHVGs(dec, n = 2000)
+  cnts = as.matrix(counts(dlpfc)[top,])
+  init_params <- splatEstimate(cnts)
+  
+  num_mk_per_ct = 5
+  batch_facLoc = 0
+  C = 8
+  I = NULL
+  N = 7000
+  L = 1
+  
+  de_prop = rep(0.5,8)
+  debug = FALSE
+  
+  # 1.simulate count data
+  noBatch <- ifelse(batch_facLoc == 0, TRUE, FALSE)
+  group_prob <- as.vector(table(y)/length(y))
+  
+  
+  params <- setParams(
+    init_params, 
+    batchCells = rep(N, L), # 3N here represents a large number such that
+    # we have sufficient cells of each type to be 
+    # allocated to the spatial transcriptomics data
+    batch.rmEffect = noBatch,
+    batch.facLoc = batch_facLoc,
+    nGenes = J,
+    group.prob = group_prob,
+    out.prob = 0,
+    de.prob = de_prop,
+    de.facLoc = de_facLoc,
+    de.facScale = de_facScale)
+  
+  sim_groups <- splatSimulate(
+    params = params, 
+    method = "groups", 
+    verbose = FALSE)
+  
+  library(Seurat)
+  library(scuttle)
+  sim_groups <- logNormCounts(sim_groups)
+  seu = as.Seurat(sim_groups)
+  seu = SCTransform(seu, assay = "originalexp")
+  Idents(seu) = seu@meta.data$Group
+  all.markers = FindAllMarkers(seu, assay = "SCT", logfc.threshold = 0.1)
+  
+  library(dplyr)
+  all.markers %>%
+    group_by(cluster) %>%
+    top_n(n = num_mk_per_ct, wt = avg_log2FC) -> top5
+  
+  out = list(top5 = top5, sim_groups = sim_groups, all.markers = all.markers)
+  return(out)
+  
+}
+```
+
+
+### generate raw count and marker gene matrix 
+Five marker genes for each cell type were selected from the top DEGs based on log-fold change. 
+```{r echo=TRUE, message=FALSE, warning=FALSE, results='hide'}
+res1 = generate_count(J = 100, de_facLoc = c(1,2,3,4,5,6,7,8)*0.1, de_facScale = c(0.1,0.1,1,0.1,1,1,0.10,0.1))
+res2 = generate_count(J = p, de_facLoc = c(1,2,3,4,5,6,7,8)*0.1, de_facScale = c(0.1,0.1,1,0.1,1,1,0.10,0.1))
+
+res1$all.markers %>%
+  group_by(cluster) %>%
+  top_n(n = 15, wt = avg_log2FC) -> top15
+adjusted_top5_gene = top15$gene[c(1:5,16:20,31:35,46:50,61:65,76:80,91:95)]
+##################################1:5,16:20,31:35,46:50,61:65,76:80,91:95
+### c(11:15,26:30,31:35,56:60,61:65,86:90,101:105)
+
+## reorder the sample to be matched with y
+Groupy = paste0("Group", y)
+num_each_celltype = table(y)
+idx1 = rep(0, length(y))
+for (i in 1:8){
+  idx1[y==i] = which(colData(res1$sim_groups)[,3] == paste0("Group",i))[1:num_each_celltype[i]] 
+}
+
+idx2 = rep(0, length(y))
+for (i in 1:8){
+  idx2[y==i] = which(colData(res2$sim_groups)[,3] == paste0("Group",i))[1:num_each_celltype[i]] 
+}
+  
+  
+## ordered samples
+X1 = counts(res1$sim_groups)[unique(adjusted_top5_gene),idx1]
+rownames(X1) = gsub("Gene","mk", rownames(X1))
+X2 = counts(res2$sim_groups)[,idx2]
+colsum = apply(X2,1,sum)
+if (min(colsum) == 0){
+  idx_not_equal_zero = which(colsum!=0)
+  X2 = X2[idx_not_equal_zero,]
+}
+
+  
+## generate rho
+rho <- matrix(0, dim(X1)[1], K+1)
+rownames(rho) <- gsub("Gene","mk", rownames(X1))
+colnames(rho)[1:(K+1)] <- paste0("ct", 1:(K+1))
+colnames(rho)[K+1] <- "Unknown"
+res1_top5_gene = gsub("Gene","mk", adjusted_top5_gene)
+for (k in 1:K) {
+  rho[res1_top5_gene[((k-1)*num_mk_per_ct + 1):(k*num_mk_per_ct)], k] <- 1
+}
+
+## define markers
+marker = list()
+for (k in 1:K){
+  marker[[k]] = rownames(rho)[rho[,k]==1]
+  names(marker)[k] = colnames(rho)[k]
+}
+
+```
+
+Then we construct the sce object and perform the normalization on simulated data using function `logNormCounts` implemented in the R packages `scran`
+```{r echo=TRUE, message=FALSE, warning=FALSE, paged.print=FALSE}
+# -------------------------------------------------
+# make BayesSpace metadata used in BayesSpace
+counts <- rbind(X1, X2)
+## Make array coordinates - filled rectangle
+cdata <- list()
+cdata$row <- pos[,1]
+cdata$col <- pos[,2]
+cdata <- as.data.frame(do.call(cbind, cdata))
+cdata$imagerow <- cdata$row
+cdata$imagecol <- cdata$col 
+## Make SCE
+## note: scater::runPCA throws warning on our small sim data, so use prcomp
+sce <- SingleCellExperiment(assays=list(counts=counts), colData=cdata)
+sce$spatial.cluster <- floor(runif(ncol(sce), 1, 3))
+
+metadata(sce)$BayesSpace.data <- list()
+metadata(sce)$BayesSpace.data$platform <- "Visium"
+metadata(sce)$BayesSpace.data$is.enhanced <- FALSE
+
+sce <- logNormCounts(sce)
+X = as.matrix(t(logcounts(sce)))
+```
+
+
+### Run SpatialAnno on simulated datasets
+Then we find the neighborhoods using the function `find_neighbors2` implemented in our package `SpatialAnno`, with specifying the type of platform as `Visium`, as DLPFC 151673 was sequenced on the platform 10x Genomics Visium. After obtaining the sparse neighborhoods matrix `Adj_sp`, we can run SpatialAnno with normalized gene expression matrix `X`, sparse neighborhoods matrix `Adj_sp`, and a list of markers `marker`. Note that we choose the initial value from annotation methods `scSorter` due to low-dimensional non-markers.
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+Adj_sp = find_neighbors2(sce, platform = "Visium")
+fit <- SpatialAnno(X = X, Adj_sp = Adj_sp, marker = marker, initial = "scSorter")
+```
+
+We demonstrate the output of SpatialAnno, which is a list contains many items. We will explain them one by one in the following part.
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+str(fit)
+```
+
+* 'R' the estimator of probability that each spot was assigned to these five cell types or "Unknown". The order of the cell types is the same as that of cell types in gene marker matrix.
+* 'xi' the estimator of smooth parameter.
+* 'type' the predicated cell types for each spot.
+* 'alpha_m'  the estimator of base expression level.
+* 'bet_m' the estimator of extra expression level.
+* 'mu_m' the mean of cell types in marker group.
+* 'sigma_m' the covariance matrix of cell types in marker group.
+* 'Ez_u' the low-dimensional embedding.
+* 'Mu_u' the mean of cell types in non-marker group.
+* 'Sgm_u' the covariance matrix of cell types in non-marker group.
+* 'W_u'  the estimator of factor loading matrix.
+* 'Lam_u' the variance of error in non-marker group.
+* 'loglik' the vector of log-likelihood of `SpatialAnno`.
+
+### plot the annotation results
+The predictions can be obtained in the following way. Then we can plot the annotation results of SpatialAnno on the original positions using R package `ggplot2`
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+prediction = colnames(rho)[fit$type]
+print(prediction[1:20])
+
+library(ggplot2)
+fit_type = colnames(rho)[fit$type]
+pos[,1] = -pos[,1]
+dat = data.frame(pos[,1], pos[,2], factor(fit_type))
+names(dat)= c("imagerow", "imagecol", "Cell type")
+
+p1 <- ggplot(dat, aes(x=imagerow, y=imagecol, color=`Cell type`)) +
+  geom_point(size = 3, alpha = 0.5) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks = element_blank())+
+  guides(colour = guide_legend(override.aes = list(size = 5)))
+p1
+```
+
+
+### calculate Kappa, mF1, and acc
+After obtaining the predictions, we can calculate Kappa, mF1 (mean F1), and acc to evalute the performance of annotation results by `SpatialAnno`. The function `cohen.kappa` to calculate Kappa is implemented in the package psych. The function `evaluate` to calculate mF1 is implemented in our package `SpatialAnno`. The Kappa is 
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(psych)
+idx = which(y2!="Unknown" & prediction!="Unknown")
+Kappa = cohen.kappa(x = cbind(y2[idx], prediction[idx]))$kappa
+print(Kappa)
+```
+
+The mF1 is
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+mF1 = mean(evaluate(y2[idx], prediction[idx])$F1)
+
+print(mF1)
+```
+
+The acc is 
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+acc = mean(y2[idx] == prediction[idx])
+print(acc)
+```
+
+### extract the embeddings
+Then we extract the embeddings from the output of `SpatialAnno`, and plot the tSNE and calculate ARI with the function `adjustedRandIndex` implemented in the R package `mclust`
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+library(scater)
+embedding = fit$Ez_u
+print(head(embedding))
+tsne = calculateTSNE(t(as.matrix(embedding)))
+```
+
+The tSNE plot is 
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.height = 2.5, fig.width = 4}
+dat = as.data.frame(tsne)
+colnames(dat) = c("X", "Y")
+dat$cluster = prediction
+library(ggplot2)
+p1 <- ggplot(dat, aes(x=X, y=Y, color=cluster)) +
+  geom_point(size = 1, alpha = 0.5) +
+  theme(axis.text.x = element_blank(),
+        axis.text.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        panel.border = element_blank(),
+        axis.ticks = element_blank())+
+  guides(colour = guide_legend(override.aes = list(size = 5), ncol=1))
+p1
+```
+
+Then we perform the clustering analysis with GMM on embedding and calculate ARI. The ARI is 
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+fit2 = Mclust(embedding, G = 3:10)
+ARI = adjustedRandIndex(y, fit2$classification)
+print(ARI)
+```
+
+We can also plot RGB plot with the function `plot_RGB` implemented in `PRECAST`. The RGB plot is demonstrated as follows
+```{r echo=TRUE, message=FALSE, warning=FALSE, fig.height = 2, fig.width = 3}
+library(PRECAST)
+tsne3dim = calculateTSNE(t(embedding), ncomponents = 3)
+pList <- plot_RGB(pos, tsne3dim, pointsize = 2)
+pList
+```

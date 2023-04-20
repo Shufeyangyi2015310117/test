@@ -1,0 +1,22 @@
+Package: SpatialAnno
+Type: Package
+Title: Probabilistic cell/domain-type assignment of spatial transcriptomics data with SpatialAnno
+Version: 1.0.0
+Date: 2021-07-11
+Authors@R: c(
+    person("Yi", "Yang", email = "yygaosansiban@sina.com", role = c("aut", "cre")),
+    person("Xingjie", "Shi", role = "aut"))
+Description: Probabilistic cell/domain-type assignment of spatial transcriptomics data with SpatialAnno
+License: GPL-3
+Depends: 
+    mclust,
+    R (>= 3.5)
+Imports: Rcpp (>= 1.0.6), SingleCellExperiment, purrr, Matrix, scSorter, mclust, ggplot2,scater, Seurat,PRECAST,ggthemes, grid, scales,RColorBrewer
+LinkingTo: Rcpp, RcppArmadillo
+RoxygenNote: 7.2.1
+VignetteBuilder: knitr
+Suggests: 
+    knitr,
+    rmarkdown
+Encoding: UTF-8
+biocViews: Software, StatisticalMethod, Clustering
